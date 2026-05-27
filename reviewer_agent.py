@@ -111,18 +111,27 @@ def analysis_node(state: AgentState) -> dict:
     if not state["diff_lines"]:
         return {"findings": []}
         
+    # We use standard LLM invocation instead of the beta structured configuration method
     llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=GEMINI_API_KEY)
-    structured_llm = llm.with_structured_output(InlineFinding)
     
     detected_findings = []
-    # Evaluate lines needing scrutiny
+    
     for line in state["diff_lines"]:
         prompt = ChatPromptTemplate.from_messages([
-            ("system", "You are an expert code reviewer. Compare the user code change line against these guidelines:\n{rules}\n\nIf the code violates a rule or contains a fatal logical vulnerability, return the finding details. If the line is perfectly fine, return empty outputs or strings."),
+            ("system", (
+                "You are an expert code reviewer. Compare the user code change line against these guidelines:\n{rules}\n\n"
+                "If the code violates a rule or contains a fatal logical vulnerability, you MUST respond strictly with a JSON object following this format:\n"
+                "{{\n"
+                '  "file_path": "the file path string",\n'
+                '  "line_number": {line_num},\n'
+                '  "issue_found": "Clear explanation of the bug or style rule violation."\n'
+                "}}\n"
+                "If the code line does not violate any rules and has no bugs, respond with the exact word: NONE"
+            )),
             ("human", "File: {file}\nLine: {line_num}\nCode Line: {code}")
         ])
         
-        chain = prompt | structured_llm
+        chain = prompt | llm
         try:
             res = chain.invoke({
                 "rules": "\n".join(state["relevant_rules"]),
@@ -130,9 +139,21 @@ def analysis_node(state: AgentState) -> dict:
                 "line_num": line["line_number"],
                 "code": line["content"]
             })
-            # Verify the finding is genuine and valid
-            if res and res.issue_found.strip():
-                detected_findings.append(res)
+            
+            response_text = res.content.strip()
+            
+            # Clean up potential markdown code block wrappers if the LLM includes them
+            if response_text.startswith("```"):
+                response_text = response_text.replace("```json", "").replace("```", "").strip()
+                
+            if response_text and response_text != "NONE":
+                data = json.loads(response_text)
+                # Parse standard values back safely into our object array
+                detected_findings.append(InlineFinding(
+                    file_path=data["file_path"],
+                    line_number=int(data["line_number"]),
+                    issue_found=data["issue_found"]
+                ))
         except Exception as e:
             print(f"Skipping evaluation line check placeholder: {e}")
             
