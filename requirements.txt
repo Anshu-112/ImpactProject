@@ -3,5 +3,5 @@ langchain-core==0.1.42
 langgraph==0.0.36
 chromadb==0.5.0
 langchain-google-genai==1.0.1
-pydantic==2.6.4git push origin test-ai-agent
+pydantic==2.6.4
 numpy==1.26.4
