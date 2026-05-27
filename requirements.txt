@@ -1,0 +1,6 @@
+PyGithub==2.3.0
+langchain-core==0.1.42
+langgraph==0.0.36
+chromadb==0.5.0
+langchain-google-genai==1.0.1
+pydantic==2.6.4

@@ -1,0 +1,35 @@
+name: AI Code Reviewer Agent
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout Code Base
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Initialize Python Environment
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Project Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run LangGraph Reviewer Agent
+        run: python reviewer_agent.py
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Remember to add GEMINI_API_KEY inside your GitHub Repository Secrets!
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
