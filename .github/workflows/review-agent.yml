@@ -2,27 +2,28 @@ name: AI Code Reviewer Agent
 
 on:
   pull_request:
-    types: [opened, synchronize]
+    branches: [ main ]
+
+# Add this explicit permissions block to unlock timeline comments!
+permissions:
+  pull-requests: write
+  contents: read
 
 jobs:
   review:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: write
-
     steps:
-      - name: Checkout Code Base
+      - name: Checkout Code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Initialize Python Environment
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      - name: Install Project Dependencies
+      - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
@@ -31,5 +32,4 @@ jobs:
         run: python reviewer_agent.py
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Remember to add GEMINI_API_KEY inside your GitHub Repository Secrets!
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}

@@ -1,205 +1,163 @@
 import os
-import json
 import re
-from typing import TypedDict, List
+import json
+from typing import List, Dict, Any
 from github import Github
-import chromadb
 from pydantic import BaseModel, Field
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langgraph.graph import StateGraph, END
+from langchain_mistralai import ChatMistralAI
 
-# =====================================================================
-# 1. ENVIRONMENT CONFIGURATION & SETUP
-# =====================================================================
+# Initialize GitHub Core Connections safely
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
 
-# Read the GitHub environment event payload
+g = Github(GITHUB_TOKEN)
+# Get the repository name from environment context automatically
+repo_name = os.getenv("GITHUB_REPOSITORY")
+repo = g.get_repo(repo_name)
+
+# Extract PR number dynamically from the GitHub event trigger metadata context
 with open(os.getenv("GITHUB_EVENT_PATH"), "r") as f:
     event_data = json.load(f)
-
-repo_name = event_data["repository"]["full_name"]
-pr_number = event_data["pull_request"]["number"]
-
-gh = Github(GITHUB_TOKEN)
-repo = gh.get_repo(repo_name)
+pr_number = event_data["number"]
 pr = repo.get_pull(pr_number)
 
-# =====================================================================
-# 2. DEFINE THE DATA LAYOUT (STATE & INLINE MODELS)
-# =====================================================================
-class CodeDiffLine(TypedDict):
-    file_path: str
-    line_number: int
-    content: str
-
 class InlineFinding(BaseModel):
-    file_path: str = Field(description="The path to the file containing a flaw.")
-    line_number: int = Field(description="The exact integer line number destination.")
-    issue_found: str = Field(description="Clear explanation of the bug or style rule violation.")
+    file_path: str = Field(description="The relative system path to the code file analyzed")
+    line_number: int = Field(description="Meticulous line sequence integer marking target spot")
+    issue_found: str = Field(description="Explicit explanation mapping out code style guidelines broken")
 
-class AgentState(TypedDict):
-    diff_lines: List[CodeDiffLine]
-    relevant_rules: List[str]
-    findings: List[InlineFinding]
-
-# =====================================================================
-# 3. CORE PROCESSING HELPER FUNCTIONS
-# =====================================================================
-def get_parsed_diff_lines() -> List[CodeDiffLine]:
-    """Downloads and parses the PR diff into standalone added line targets."""
+def get_parsed_diff_lines() -> List[Dict[str, Any]]:
     parsed_lines = []
-    # Get files changed in the PR
-    pr_files = pr.get_files()
-    
-    for file in pr_files:
-        if not file.patch or not file.filename.endswith(".py"):
-            continue # Only review Python source files for this MVP
-            
-        current_line = 0
-        for line in file.patch.split("\n"):
-            # Parse Git Hunk Header line indicators
-            if line.startswith("@@"):
-                match = re.search(r"\+(\d+)", line)
-                if match:
-                    current_line = int(match.group(1)) - 1
+    try:
+        pr_files = pr.get_files()
+        for file in pr_files:
+            # Track any python file that was modified or added
+            if not file.filename.endswith(".py"):
                 continue
-            
-            if not line.startswith("-"):
-                current_line += 1
                 
-            if line.startswith("+"):
-                parsed_lines.append({
-                    "file_path": file.filename,
-                    "line_number": current_line,
-                    "content": line[1:].strip()
-                })
+            # If it's a brand new file, file.patch might be empty or formatted differently.
+            # Let's fetch the raw content directly from the repository to be 100% safe!
+            try:
+                file_content = repo.get_contents(file.filename, ref=pr.head.sha).decoded_content.decode("utf-8")
+                lines = file_content.split("\n")
+                for idx, content in enumerate(lines):
+                    if content.strip(): # Skip completely empty lines
+                        parsed_lines.append({
+                            "file_path": file.filename,
+                            "line_number": idx + 1,
+                            "content": content.strip()
+                        })
+            except Exception as e:
+                # Fallback to standard patch parsing if direct fetch fails
+                if file.patch:
+                    current_line = 0
+                    for line in file.patch.split("\n"):
+                        if line.startswith("@@"):
+                            match = re.search(r"\+(\d+)", line)
+                            if match:
+                                current_line = int(match.group(1)) - 1
+                            continue
+                        if not line.startswith("-"):
+                            current_line += 1
+                        if line.startswith("+"):
+                            parsed_lines.append({
+                                "file_path": file.filename,
+                                "line_number": current_line,
+                                "content": line[1:].strip()
+                            })
+    except Exception as e:
+        print(f"Error parsing diff files: {e}")
     return parsed_lines
 
-def setup_ephemeral_rag(diff_content: str) -> List[str]:
-    """Loads guidelines dynamically into ChromaDB and returns matching entries."""
-    chroma_client = chromadb.EphemeralClient()
-    collection = chroma_client.create_collection(name="style_rules")
-    
-    with open("style_guide.md", "r") as f:
-        guide_text = f.read()
-        
-    # Chunking by sections
-    rules = [r.strip() for r in guide_text.split("##") if r.strip()]
-    for i, rule in enumerate(rules):
-        collection.add(
-            documents=[rule],
-            ids=[f"rule_{i}"]
-        )
-        
-    results = collection.query(query_texts=[diff_content], n_results=1)
-    return results["documents"][0] if results["documents"] else []
-
-# =====================================================================
-# 4. LANGGRAPH NODE WORKFLOW OPERATIONS
-# =====================================================================
-def ingestion_node(state: AgentState) -> dict:
-    print("--- [STEP 1/3] Fetching and Parsing PR Diffs ---")
-    lines = get_parsed_diff_lines()
-    all_code_snippet = "\n".join([l["content"] for l in lines])
-    rules = setup_ephemeral_rag(all_code_snippet)
-    return {"diff_lines": lines, "relevant_rules": rules}
-
-def analysis_node(state: AgentState) -> dict:
-    print("--- [STEP 2/3] Analyzing Code with Gemini Framework ---")
-    if not state["diff_lines"]:
-        return {"findings": []}
-        
-    # We use standard LLM invocation instead of the beta structured configuration method
-    llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=GEMINI_API_KEY)
-    
+def analysis_node(state: Dict[str, Any]) -> Dict[str, Any]:
+    print("--- [STEP 2/3] Analyzing Code with Mistral Framework ---")
     detected_findings = []
     
-    for line in state["diff_lines"]:
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", (
-                "You are an expert code reviewer. Compare the user code change line against these guidelines:\n{rules}\n\n"
-                "If the code violates a rule or contains a fatal logical vulnerability, you MUST respond strictly with a JSON object following this format:\n"
-                "{{\n"
-                '  "file_path": "the file path string",\n'
-                '  "line_number": {line_num},\n'
-                '  "issue_found": "Clear explanation of the bug or style rule violation."\n'
-                "}}\n"
-                "If the code line does not violate any rules and has no bugs, respond with the exact word: NONE"
-            )),
-            ("human", "File: {file}\nLine: {line_num}\nCode Line: {code}")
-        ])
+    if not state.get("diff_lines"):
+        return {"findings": []}
         
-        chain = prompt | llm
-        try:
-            res = chain.invoke({
-                "rules": "\n".join(state["relevant_rules"]),
-                "file": line["file_path"],
-                "line_num": line["line_number"],
-                "code": line["content"]
-            })
+    llm = ChatMistralAI(
+        model="open-mistral-7b", 
+        mistral_api_key=MISTRAL_API_KEY
+    )
+    
+    try:
+        with open("style_guide.md", "r") as f:
+            system_rules = f.read()
+    except Exception:
+        system_rules = "1. Secure code configurations. No plain text passwords. 2. Use standard naming conventions."
+    
+    code_payload = ""
+    for line in state["diff_lines"]:
+        code_payload += f"File: {line['file_path']} | Line: {line['line_number']} | Code: {line['content']}\n"
+
+    # CRITICAL: We pass raw standard text dictionaries. No ChatPromptTemplate compiler to cause missing variables!
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                f"You are an expert enterprise code reviewer. Compare the submitted code lines against these company guidelines:\n\n{system_rules}\n\n"
+                "Analyze the lines. If a line violates a guideline or contains a clear security vulnerability, you MUST list it in a raw JSON array format exactly like this:\n"
+                "[\n"
+                "  {\n"
+                '    "file_path": "filename.py",\n'
+                '    "line_number": 12,\n'
+                '    "issue_found": "Explanation of violation"\n'
+                "  }\n"
+                "]\n\n"
+                "If no issues are discovered across any lines, reply exactly with: []"
+            )
+        },
+        {
+            "role": "user",
+            "content": f"Review these code additions:\n\n{code_payload}"
+        }
+    ]
+    
+    try:
+        res = llm.invoke(messages)
+        response_text = res.content.strip()
+        
+        if response_text.startswith("```"):
+            response_text = response_text.replace("```json", "").replace("```", "").strip()
             
-            response_text = res.content.strip()
-            
-            # Clean up potential markdown code block wrappers if the LLM includes them
-            if response_text.startswith("```"):
-                response_text = response_text.replace("```json", "").replace("```", "").strip()
-                
-            if response_text and response_text != "NONE":
-                data = json.loads(response_text)
-                # Parse standard values back safely into our object array
-                detected_findings.append(InlineFinding(
-                    file_path=data["file_path"],
-                    line_number=int(data["line_number"]),
-                    issue_found=data["issue_found"]
-                ))
-        except Exception as e:
-            print(f"Skipping evaluation line check placeholder: {e}")
-            
+        if response_text and response_text != "[]":
+            data = json.loads(response_text)
+            if isinstance(data, list):
+                for item in data:
+                    detected_findings.append(InlineFinding(
+                        file_path=item.get("file_path", "unknown"),
+                        line_number=int(item.get("line_number", 0)),
+                        issue_found=item.get("issue_found", "Violation found")
+                    ))
+    except Exception as e:
+        print(f"Error during batch analysis parsing: {e}")
+        
     return {"findings": detected_findings}
 
-def publisher_node(state: AgentState) -> dict:
+def publisher_node(state: Dict[str, Any]) -> Dict[str, Any]:
     print("--- [STEP 3/3] Committing Feedbacks to GitHub Window ---")
-    if not state["findings"]:
+    if not state.get("findings"):
         pr.create_issue_comment("🚀 **AI Review Completed:** No stylistic issues or bugs discovered in this changes patch code execution baseline.")
         return {}
         
-    # Collate multiple individual target elements into one single review draft
-    review_comments = []
-    latest_commit_hash = pr.get_commits().reversed[0]
+    comment_body = "### 🤖 AI Code Review Agent Report\n\n"
+    comment_body += "I have scanned your changes against the corporate engineering guidelines and found the following issues:\n\n"
+    comment_body += "| File Path | Line Number | Issue Description |\n"
+    comment_body += "| :--- | :--- | :--- |\n"
     
     for finding in state["findings"]:
-        review_comments.append({
-            "path": finding.file_path,
-            "line": finding.line_number,
-            "body": f"⚠️ **AI Review Catch:** {finding.issue_found}"
-        })
+        comment_body += f"| `{finding.file_path}` | **Line {finding.line_number}** | ⚠️ {finding.issue_found} |\n"
         
-    # Fire a unified batch Review submission layout request payload
-    pr.create_review(
-        commit=latest_commit_hash,
-        event="COMMENT",
-        comments=review_comments
-    )
+    comment_body += "\n\n*Please fix these style or security violations before merging this pull request.*"
+    
+    pr.create_issue_comment(comment_body)
+    print("✅ Successfully posted summary report to the PR timeline.")
     return {}
 
-# =====================================================================
-# 5. ASSEMBLE AND RUN THE COMPUTATION GRAPH
-# =====================================================================
-workflow = StateGraph(AgentState)
-
-workflow.add_node("IngestDiffAndRAG", ingestion_node)
-workflow.add_node("AnalyzeCode", analysis_node)
-workflow.add_node("PostToGitHub", publisher_node)
-
-workflow.set_entry_point("IngestDiffAndRAG")
-workflow.add_edge("IngestDiffAndRAG", "AnalyzeCode")
-workflow.add_edge("AnalyzeCode", "PostToGitHub")
-workflow.add_edge("PostToGitHub", END)
-
-app = workflow.compile()
-
 if __name__ == "__main__":
-    app.invoke({"diff_lines": [], "relevant_rules": [], "findings": []})
+    print("Starting pipeline manual orchestration loop context pass...")
+    diff_data = get_parsed_diff_lines()
+    analysis_state = analysis_node({"diff_lines": diff_data})
+    publisher_node(analysis_state)
     print("🎉 Action review pipeline executed completely.")
