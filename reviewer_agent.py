@@ -31,26 +31,40 @@ def get_parsed_diff_lines() -> List[Dict[str, Any]]:
     try:
         pr_files = pr.get_files()
         for file in pr_files:
-            if not file.filename.endswith(".py") or not file.patch:
+            # Track any python file that was modified or added
+            if not file.filename.endswith(".py"):
                 continue
                 
-            current_line = 0
-            for line in file.patch.split("\n"):
-                if line.startswith("@@"):
-                    match = re.search(r"\+(\d+)", line)
-                    if match:
-                        current_line = int(match.group(1)) - 1
-                    continue
-                
-                if not line.startswith("-"):
-                    current_line += 1
-                    
-                if line.startswith("+"):
-                    parsed_lines.append({
-                        "file_path": file.filename,
-                        "line_number": current_line,
-                        "content": line[1:].strip()
-                    })
+            # If it's a brand new file, file.patch might be empty or formatted differently.
+            # Let's fetch the raw content directly from the repository to be 100% safe!
+            try:
+                file_content = repo.get_contents(file.filename, ref=pr.head.sha).decoded_content.decode("utf-8")
+                lines = file_content.split("\n")
+                for idx, content in enumerate(lines):
+                    if content.strip(): # Skip completely empty lines
+                        parsed_lines.append({
+                            "file_path": file.filename,
+                            "line_number": idx + 1,
+                            "content": content.strip()
+                        })
+            except Exception as e:
+                # Fallback to standard patch parsing if direct fetch fails
+                if file.patch:
+                    current_line = 0
+                    for line in file.patch.split("\n"):
+                        if line.startswith("@@"):
+                            match = re.search(r"\+(\d+)", line)
+                            if match:
+                                current_line = int(match.group(1)) - 1
+                            continue
+                        if not line.startswith("-"):
+                            current_line += 1
+                        if line.startswith("+"):
+                            parsed_lines.append({
+                                "file_path": file.filename,
+                                "line_number": current_line,
+                                "content": line[1:].strip()
+                            })
     except Exception as e:
         print(f"Error parsing diff files: {e}")
     return parsed_lines
