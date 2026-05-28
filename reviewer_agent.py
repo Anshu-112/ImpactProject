@@ -6,7 +6,7 @@ from github import Github
 import chromadb
 from pydantic import BaseModel, Field
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_mistralai import ChatMistralAI
 from langgraph.graph import StateGraph, END
 
 # =====================================================================
@@ -114,14 +114,19 @@ def ingestion_node(state: AgentState) -> dict:
     return {"diff_lines": lines, "relevant_rules": rules}
 
 def analysis_node(state: AgentState) -> dict:
-    print("--- [STEP 2/3] Analyzing Code with Gemini Framework ---")
+    print("--- [STEP 2/3] Analyzing Code with Mistral Framework ---")
     if not state["diff_lines"]:
         return {"findings": []}
         
-    # We use standard LLM invocation instead of the beta structured configuration method
-    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", google_api_key=GEMINI_API_KEY,convert_system_message_to_human=True)
+    # Read Mistral API Key from environment variables
+    MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
     
-    detected_findings = []
+    # Initialize Mistral instead of Gemini
+    # We use 'codestral-latest' because it's highly optimized for code review tasks
+    llm = ChatMistralAI(
+        model="codestral-latest", 
+        mistral_api_key=MISTRAL_API_KEY
+    )
     
     for line in state["diff_lines"]:
         prompt = ChatPromptTemplate.from_messages([
