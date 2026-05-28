@@ -48,33 +48,40 @@ class AgentState(TypedDict):
 # 3. CORE PROCESSING HELPER FUNCTIONS
 # =====================================================================
 def get_parsed_diff_lines() -> List[CodeDiffLine]:
-    """Downloads and parses the PR diff into standalone added line targets."""
+    """Downloads and parses the PR diff cleanly without risk of infinite loops."""
     parsed_lines = []
-    # Get files changed in the PR
-    pr_files = pr.get_files()
     
-    for file in pr_files:
-        if not file.patch or not file.filename.endswith(".py"):
-            continue # Only review Python source files for this MVP
-            
-        current_line = 0
-        for line in file.patch.split("\n"):
-            # Parse Git Hunk Header line indicators
-            if line.startswith("@@"):
-                match = re.search(r"\+(\d+)", line)
-                if match:
-                    current_line = int(match.group(1)) - 1
+    try:
+        pr_files = pr.get_files()
+        for file in pr_files:
+            # Only analyze Python files, skip deleted or empty files
+            if not file.filename.endswith(".py") or not file.patch:
                 continue
-            
-            if not line.startswith("-"):
-                current_line += 1
                 
-            if line.startswith("+"):
-                parsed_lines.append({
-                    "file_path": file.filename,
-                    "line_number": current_line,
-                    "content": line[1:].strip()
-                })
+            current_line = 0
+            # Read the patch changes sequentially, line by line
+            for line in file.patch.split("\n"):
+                if line.startswith("@@"):
+                    # Extract the starting destination line number from hunk header
+                    match = re.search(r"\+(\d+)", line)
+                    if match:
+                        current_line = int(match.group(1)) - 1
+                    continue
+                
+                # If it's a normal or added line, increment the tracker
+                if not line.startswith("-"):
+                    current_line += 1
+                    
+                # Store the change if it's an explicit addition (+)
+                if line.startswith("+"):
+                    parsed_lines.append({
+                        "file_path": file.filename,
+                        "line_number": current_line,
+                        "content": line[1:].strip()
+                    })
+    except Exception as e:
+        print(f"Error parsing diff files: {e}")
+        
     return parsed_lines
 
 def setup_ephemeral_rag(diff_content: str) -> List[str]:
