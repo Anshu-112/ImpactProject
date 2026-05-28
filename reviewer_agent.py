@@ -116,7 +116,6 @@ def ingestion_node(state: AgentState) -> dict:
 def analysis_node(state: AgentState) -> dict:
     print("--- [STEP 2/3] Analyzing Code with Mistral Framework ---")
     
-    # 1. ALWAYS define your return variable at the absolute top of the function scope
     detected_findings = []
     
     if not state.get("diff_lines"):
@@ -127,7 +126,6 @@ def analysis_node(state: AgentState) -> dict:
         print("❌ Error: MISTRAL_API_KEY environment variable is missing!")
         return {"findings": []}
         
-    # Using 'open-mistral-7b' or 'codestral-latest' depending on your free tier tier allocations
     llm = ChatMistralAI(
         model="open-mistral-7b", 
         mistral_api_key=MISTRAL_API_KEY
@@ -143,16 +141,17 @@ def analysis_node(state: AgentState) -> dict:
     for line in state["diff_lines"]:
         code_payload += f"File: {line['file_path']} | Line: {line['line_number']} | Code: {line['content']}\n"
 
+    # Note the double {{ }} around the raw JSON example below so LangChain skips them!
     prompt = ChatPromptTemplate.from_messages([
         ("system", (
             f"You are an expert enterprise code reviewer. Compare the submitted code lines against these company guidelines:\n\n{system_rules}\n\n"
             "Analyze the lines. If a line violates a guideline or contains a clear security vulnerability, you MUST list it in a raw JSON array format exactly like this:\n"
             "[\n"
-            "  {\n"
+            "  {{\n"
             '    "file_path": "filename.py",\n'
             '    "line_number": 12,\n'
             '    "issue_found": "Explanation of violation"\n'
-            "  }\n"
+            "  }}\n"
             "]\n\n"
             "If no issues are discovered across any lines, reply exactly with: []"
         )),
@@ -161,6 +160,7 @@ def analysis_node(state: AgentState) -> dict:
     
     chain = prompt | llm
     try:
+        # Pass an empty dictionary since our prompt string variables are resolved inline via f-strings
         res = chain.invoke({})
         response_text = res.content.strip()
         
