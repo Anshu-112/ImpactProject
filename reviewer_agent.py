@@ -112,7 +112,7 @@ def analysis_node(state: AgentState) -> dict:
         return {"findings": []}
         
     # We use standard LLM invocation instead of the beta structured configuration method
-    llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=GEMINI_API_KEY)
+    llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=GEMINI_API_KEY,convert_system_message_to_human=True)
     
     detected_findings = []
     
@@ -164,24 +164,21 @@ def publisher_node(state: AgentState) -> dict:
     if not state["findings"]:
         pr.create_issue_comment("🚀 **AI Review Completed:** No stylistic issues or bugs discovered in this changes patch code execution baseline.")
         return {}
-        
-    # Collate multiple individual target elements into one single review draft
-    review_comments = []
-    latest_commit_hash = pr.get_commits().reversed[0]
-    
+
+    # Build a beautiful, structured Markdown report for the main PR conversation timeline
+    comment_body = "### 🤖 AI Code Review Agent Report\n\n"
+    comment_body += "I have scanned your changes against the corporate engineering guidelines and found the following issues:\n\n"
+    comment_body += "| File Path | Line Number | Issue Description |\n"
+    comment_body += "| :--- | :--- | :--- |\n"
+
     for finding in state["findings"]:
-        review_comments.append({
-            "path": finding.file_path,
-            "line": finding.line_number,
-            "body": f"⚠️ **AI Review Catch:** {finding.issue_found}"
-        })
-        
-    # Fire a unified batch Review submission layout request payload
-    pr.create_review(
-        commit=latest_commit_hash,
-        event="COMMENT",
-        comments=review_comments
-    )
+        comment_body += f"| `{finding.file_path}` | **Line {finding.line_number}** | ⚠️ {finding.issue_found} |\n"
+
+    comment_body += "\n\n*Please fix these style or security violations before merging this pull request.*"
+
+    # Post it as a single master comment on the main timeline
+    pr.create_issue_comment(comment_body)
+    print("✅ Successfully posted summary report to the PR timeline.")
     return {}
 
 # =====================================================================
