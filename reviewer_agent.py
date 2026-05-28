@@ -115,60 +115,70 @@ def ingestion_node(state: AgentState) -> dict:
 
 def analysis_node(state: AgentState) -> dict:
     print("--- [STEP 2/3] Analyzing Code with Mistral Framework ---")
-    if not state["diff_lines"]:
+    
+    # 1. ALWAYS define your return variable at the absolute top of the function scope
+    detected_findings = []
+    
+    if not state.get("diff_lines"):
         return {"findings": []}
         
-    # Read Mistral API Key from environment variables
     MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
-    
-    # Initialize Mistral instead of Gemini
-    # We use 'codestral-latest' because it's highly optimized for code review tasks
+    if not MISTRAL_API_KEY:
+        print("❌ Error: MISTRAL_API_KEY environment variable is missing!")
+        return {"findings": []}
+        
+    # Using 'open-mistral-7b' or 'codestral-latest' depending on your free tier tier allocations
     llm = ChatMistralAI(
-        model="codestral-latest", 
+        model="open-mistral-7b", 
         mistral_api_key=MISTRAL_API_KEY
     )
     
+    try:
+        with open("style_guide.md", "r") as f:
+            system_rules = f.read()
+    except Exception:
+        system_rules = "1. Secure code configurations. No plain text passwords. 2. Use standard naming conventions."
+    
+    code_payload = ""
     for line in state["diff_lines"]:
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", (
-                "You are an expert code reviewer. Compare the user code change line against these guidelines:\n{rules}\n\n"
-                "If the code violates a rule or contains a fatal logical vulnerability, you MUST respond strictly with a JSON object following this format:\n"
-                "{{\n"
-                '  "file_path": "the file path string",\n'
-                '  "line_number": {line_num},\n'
-                '  "issue_found": "Clear explanation of the bug or style rule violation."\n'
-                "}}\n"
-                "If the code line does not violate any rules and has no bugs, respond with the exact word: NONE"
-            )),
-            ("human", "File: {file}\nLine: {line_num}\nCode Line: {code}")
-        ])
+        code_payload += f"File: {line['file_path']} | Line: {line['line_number']} | Code: {line['content']}\n"
+
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", (
+            f"You are an expert enterprise code reviewer. Compare the submitted code lines against these company guidelines:\n\n{system_rules}\n\n"
+            "Analyze the lines. If a line violates a guideline or contains a clear security vulnerability, you MUST list it in a raw JSON array format exactly like this:\n"
+            "[\n"
+            "  {\n"
+            '    "file_path": "filename.py",\n'
+            '    "line_number": 12,\n'
+            '    "issue_found": "Explanation of violation"\n'
+            "  }\n"
+            "]\n\n"
+            "If no issues are discovered across any lines, reply exactly with: []"
+        )),
+        ("human", f"Review these code additions:\n\n{code_payload}")
+    ])
+    
+    chain = prompt | llm
+    try:
+        res = chain.invoke({})
+        response_text = res.content.strip()
         
-        chain = prompt | llm
-        try:
-            res = chain.invoke({
-                "rules": "\n".join(state["relevant_rules"]),
-                "file": line["file_path"],
-                "line_num": line["line_number"],
-                "code": line["content"]
-            })
+        if response_text.startswith("```"):
+            response_text = response_text.replace("```json", "").replace("```", "").strip()
             
-            response_text = res.content.strip()
-            
-            # Clean up potential markdown code block wrappers if the LLM includes them
-            if response_text.startswith("```"):
-                response_text = response_text.replace("```json", "").replace("```", "").strip()
-                
-            if response_text and response_text != "NONE":
-                data = json.loads(response_text)
-                # Parse standard values back safely into our object array
-                detected_findings.append(InlineFinding(
-                    file_path=data["file_path"],
-                    line_number=int(data["line_number"]),
-                    issue_found=data["issue_found"]
-                ))
-        except Exception as e:
-            print(f"Skipping evaluation line check placeholder: {e}")
-            
+        if response_text and response_text != "[]":
+            data = json.loads(response_text)
+            if isinstance(data, list):
+                for item in data:
+                    detected_findings.append(InlineFinding(
+                        file_path=item.get("file_path", "unknown"),
+                        line_number=int(item.get("line_number", 0)),
+                        issue_found=item.get("issue_found", "Violation found")
+                    ))
+    except Exception as e:
+        print(f"Error during batch analysis parsing: {e}")
+        
     return {"findings": detected_findings}
 
 def publisher_node(state: AgentState) -> dict:
