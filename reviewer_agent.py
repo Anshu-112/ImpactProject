@@ -119,7 +119,7 @@ def analysis_node(state: AgentState) -> dict:
         return {"findings": []}
         
     # We use standard LLM invocation instead of the beta structured configuration method
-    llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=GEMINI_API_KEY,convert_system_message_to_human=True)
+    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", google_api_key=GEMINI_API_KEY,convert_system_message_to_human=True)
     
     detected_findings = []
     
